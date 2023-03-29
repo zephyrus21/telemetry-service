@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -16,8 +18,9 @@ type Device struct {
 }
 
 type metrics struct {
-	devices prometheus.Gauge
-	info    *prometheus.GaugeVec
+	devices  prometheus.Gauge
+	info     *prometheus.GaugeVec
+	upgrades *prometheus.CounterVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *metrics {
@@ -34,8 +37,15 @@ func NewMetrics(reg prometheus.Registerer) *metrics {
 		},
 			[]string{"version"},
 		),
+		upgrades: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "monitoringsystem",
+			Name:      "upgrades",
+			Help:      "Number of upgrades",
+		},
+			[]string{"type"},
+		),
 	}
-	reg.MustRegister(m.devices, m.info)
+	reg.MustRegister(m.devices, m.info, m.upgrades)
 	return m
 }
 
@@ -122,4 +132,45 @@ func createDevice(w http.ResponseWriter, r *http.Request, m *metrics) {
 
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte("Device created"))
+}
+
+func upgradeDevice(w http.ResponseWriter, r *http.Request, m *metrics) {
+	path := strings.TrimPrefix(r.URL.Path, "/devices/")
+
+	id, err := strconv.Atoi(path)
+	if err != nil || id < 1 {
+		http.NotFound(w, r)
+	}
+
+	var dv Device
+	err = json.NewDecoder(r.Body).Decode(&dv)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	for i := range dvs {
+		if dvs[i].ID == id {
+			dvs[i].Firmware = dv.Firmware
+		}
+	}
+
+	m.upgrades.With(prometheus.Labels{"type": "router"}).Inc()
+
+	w.WriteHeader(http.StatusAccepted)
+	w.Write([]byte("Device upgrading..."))
+}
+
+type manageDeviceHandler struct {
+	metrics *metrics
+}
+
+func (mdh manageDeviceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "PUT":
+		upgradeDevice(w, r, mdh.metrics)
+	default:
+		w.Header().Set("Allow", "PUT")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
